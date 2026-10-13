@@ -1,0 +1,4 @@
+int convert();
+int write_func();
+void *read_thread();
+void *write_thread();

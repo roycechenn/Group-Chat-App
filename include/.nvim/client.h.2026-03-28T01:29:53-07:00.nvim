@@ -1,0 +1,3 @@
+int convert();
+int write_func();
+void* read_func();

@@ -41,9 +41,6 @@ Requirements:
 - Python 3.8 or newer to run the automated tests; it is optional when building
   only the application.
 
-The project was originally written for Linux. The latest verified build and test
-run used macOS. The supplied assignment test executables under `bin/` run on Linux.
-
 From the project directory:
 
 ```sh
@@ -136,7 +133,6 @@ src/config.c           Checked command-line argument parsing
 src/server.c           Connections, broadcast ordering, and group completion
 src/client.c           Random generation, receiving, printing, and logging
 tests/                 Python integration and regression tests
-bin/                   Original Linux assignment test executables
 ```
 
 ## Development and testing

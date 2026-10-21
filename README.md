@@ -126,7 +126,7 @@ truncated frames when the server closes the connection.
 ## Project structure
 
 ```text
-CMakeLists.txt          Executables, shared library, sanitizers, and CTest
+CMakeLists.txt         Executables, shared library, sanitizers, and CTest
 include/protocol.h     Message types, frame limits, and parser/encoder API
 include/connection.h   Socket state, input buffers, and output queues
 include/config.h       Server/client configuration and argument parsing API

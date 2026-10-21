@@ -38,7 +38,10 @@ class CommandLineTests(ChatTest):
                     process.close()
 
     def test_occupied_server_port_reports_error(self):
-        with listener() as host:
+        # Match the server's wildcard binding to force an actual conflict.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as host:
+            host.bind(("0.0.0.0", 0))
+            host.listen(1)
             self.rejected(self.process(SERVER, [host.getsockname()[1], 1]))
 
     def assert_client_validation(self, ip=None, port_transform=None, count="0"):

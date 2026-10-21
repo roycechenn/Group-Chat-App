@@ -26,7 +26,8 @@ bool parse_server_args(int argc, char **argv, ServerConfig *config) {
     long clients;
 
     if (argc != 3 || !parse_number(argv[1], 1, 65535, &port) ||
-        !parse_number(argv[2], 1, SERVER_CLIENT_LIMIT, &clients))) return false;
+        !parse_number(argv[2], 1, SERVER_CLIENT_LIMIT, &clients))
+        return false;
 
     config->port = port;
     config->max_clients = clients;

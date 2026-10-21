@@ -9,7 +9,7 @@ typedef struct {
     int fd;
 
     uint32_t peer_ip;
-    uint64_t peer_port;
+    uint16_t peer_port;
     bool done;
 
     uint8_t input[INPUT_CAPACITY];

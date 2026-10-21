@@ -4,7 +4,8 @@
 #include <stdint.h>
 #include <string.h>
 
-static ParseResult parse_frame(const uint8_t *data, size_t length, bool include_address, Message *message, size_t *consumed) {
+static ParseResult parse_frame(const uint8_t *data, size_t length, bool include_address, Message *message,
+                               size_t *consumed) {
     if (consumed != NULL) *consumed = 0;
 
     if (message == NULL || consumed == NULL || (data == NULL && length != 0)) return PARSE_INVALID;
@@ -32,7 +33,7 @@ static ParseResult parse_frame(const uint8_t *data, size_t length, bool include_
     if (length <= header_size) return PARSE_INCOMPLETE;
 
     size_t search_end = length < frame_size ? length : frame_size;
-    const uint8_t *newline = memchr(data + header_size, '\n', frame_size - header_size);
+    const uint8_t *newline = memchr(data + header_size, '\n', search_end - header_size);
     if (newline == NULL) return length >= frame_size ? PARSE_INVALID : PARSE_INCOMPLETE;
 
     size_t text_length = (size_t)(newline - (data + header_size));
@@ -44,7 +45,7 @@ static ParseResult parse_frame(const uint8_t *data, size_t length, bool include_
     }
 
     memcpy(&result.text, data + header_size, text_length);
-    result.text[text_length] = '\n';
+    result.text[text_length] = '\0';
     result.text_length = text_length;
 
     *message = result;
@@ -52,7 +53,8 @@ static ParseResult parse_frame(const uint8_t *data, size_t length, bool include_
     return PARSE_COMPLETE;
 }
 
-static bool encode_frame(const Message *message, bool include_address, uint8_t *output, size_t capacity, size_t *written) {
+static bool encode_frame(const Message *message, bool include_address, uint8_t *output, size_t capacity,
+                         size_t *written) {
     if (written != NULL) *written = 0;
     if (message == NULL || output == NULL || written == NULL) return false;
 
@@ -64,7 +66,7 @@ static bool encode_frame(const Message *message, bool include_address, uint8_t *
         return true;
     }
 
-    if (message->type != MESSAGE_DONE || message->text_length > MAX_TEXT_SIZE) return false;
+    if (message->type != MESSAGE_CHAT || message->text_length > MAX_TEXT_SIZE) return false;
 
     if (memchr(message->text, '\n', message->text_length) != NULL) return false; // no "\n" in msg
 

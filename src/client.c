@@ -1,207 +1,237 @@
-#include "../include/client.h"
+#include "../include/config.h"
+#include "../include/connection.h"
+
 #include <arpa/inet.h>
-#include <fcntl.h>
+#include <errno.h>
 #include <pthread.h>
-#include <stdint.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/random.h>
 #include <sys/socket.h>
 #include <unistd.h>
-#define handle_error(msg)                                                      \
-  do {                                                                         \
-    perror(msg);                                                               \
-    exit(EXIT_FAILURE);                                                        \
-  } while (0)
 
-#define BUF_SIZE 1024
-#define MSG_LEN 10
+enum { RANDOM_BYTE_COUNT = 10 };
 
-struct read_arg {
-  int fd;
-  char *log_path;
-};
+typedef struct {
+    int fd;
+    int message_count;
 
-struct write_arg {
-  int fd;
-  int num_msg;
-};
+    /*
+     * Written by the sender and read by main only after pthread_join().
+     */
+    int error;
+} SenderArgs;
 
-int convert(uint8_t *buf, ssize_t buf_size, char *str, ssize_t str_size) {
-  if (buf == NULL || str == NULL || buf_size <= 0 ||
-      str_size < (buf_size * 2 + 1))
-    return -1;
+static void *send_messages(void *context) {
+    SenderArgs *args = context;
 
-  for (int i = 0; i < buf_size; i++)
-    sprintf(str + i * 2, "%02X", buf[i]);
-  str[buf_size * 2] = '\0';
+    static const char hex[] = "0123456789ABCDEF";
 
-  return 0;
-}
+    Message message = {.type = MESSAGE_CHAT, .text_length = RANDOM_BYTE_COUNT * 2};
 
-int write_func(int fd, char const *buf, int len) {
-  size_t sent = 0;
-  while (sent < len) {
-    ssize_t n = write(fd, buf + sent, len - sent);
-    if (n <= 0)
-      return -1;
-    sent += (ssize_t)n;
-  }
-  return 0;
-}
+    uint8_t frame[MAX_FRAME_SIZE];
+    size_t frame_length;
 
-void *read_thread(void *arg_) {
-  struct read_arg arg = *(struct read_arg *)arg_;
-  int fd = arg.fd;
-  char *path = arg.log_path;
+    for (int i = 0; i < args->message_count; ++i) {
+        uint8_t random_bytes[RANDOM_BYTE_COUNT];
 
-  int log_fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
-  if (log_fd == -1)
-    handle_error("open");
+        if (getentropy(random_bytes, sizeof(random_bytes)) == -1) goto failed;
 
-  uint8_t buf[BUF_SIZE * 2]; // raw bytes
-  size_t n = 0;
-  for (;;) {
-    ssize_t num_read = read(fd, buf + n, sizeof(buf) - n);
-    if (num_read < 0) {
-      close(log_fd);
-      handle_error("read");
-    }
-    if (num_read == 0)
-      break;
-
-    n += (size_t)num_read;
-
-    while (1) {
-      if (n < 1)
-        break;
-      if (buf[0] == 0) {
-        // [0][4b ip][2b port][\n]
-        if (n < 8)
-          break;
-
-        ssize_t new_line_idx = -1;
-        for (int i = 7; i < n; i++) {
-          if (buf[i] == '\n') {
-            new_line_idx = i;
-            break;
-          }
+        for (size_t j = 0; j < sizeof(random_bytes); ++j) {
+            message.text[j * 2] = (uint8_t)hex[random_bytes[j] >> 4];
+            message.text[j * 2 + 1] = (uint8_t)hex[random_bytes[j] & 0x0F];
         }
 
-        if (new_line_idx == -1)
-          break;
+        if (!encode_client_frame(&message, frame, sizeof(frame), &frame_length)) {
+            errno = EPROTO;
+            goto failed;
+        }
 
-        uint32_t ip;
-        uint16_t port_;
-        memcpy(&ip, buf + 1, sizeof(ip));
-        memcpy(&port_, buf + 5, sizeof(port_));
-
-        // convert ip to string
-        char str_ip[INET_ADDRSTRLEN];
-        if (inet_ntop(AF_INET, &ip, str_ip, sizeof(str_ip)) == NULL)
-          handle_error("inet_ntop");
-
-        unsigned port = (unsigned)ntohs(port_);
-
-        size_t len = (size_t)new_line_idx - 7;
-        char msg[BUF_SIZE];
-        memcpy(msg, buf + 7, len);
-        msg[len] = '\0';
-
-        char output[BUF_SIZE];
-        sprintf(output, "%-15s%-10u%s\n", str_ip, port, msg);
-        printf("%-15s%-10u%s\n", str_ip, port, msg);
-        if (write_func(log_fd, output, strlen(output)) == -1)
-          handle_error("write");
-
-        size_t end_msg_idx = (size_t)new_line_idx + 1;
-        memmove(buf, buf + end_msg_idx, n - end_msg_idx);
-        n -= end_msg_idx;
-      }
-      if (buf[0] == 1) {
-        if (n < 2) // 1 \n
-          break;
-        close(log_fd);
-        return NULL;
-      }
+        if (write_all(args->fd, frame, frame_length) == -1) goto failed;
     }
-  }
-  close(log_fd);
-  return NULL;
+
+    Message done = {.type = MESSAGE_DONE};
+
+    if (!encode_client_frame(&done, frame, sizeof(frame), &frame_length)) {
+        errno = EPROTO;
+        goto failed;
+    }
+
+    if (write_all(args->fd, frame, frame_length) == -1) goto failed;
+
+    return NULL;
+
+failed:
+    args->error = errno != 0 ? errno : EIO;
+
+    /* Wake the receiver if it is waiting for a server response. */
+    shutdown(args->fd, SHUT_RDWR);
+    return NULL;
 }
 
-void *write_thread(void *arg_) {
-  struct write_arg arg = *(struct write_arg *)arg_;
-  int num_msg = arg.num_msg;
-  int fd = arg.fd;
+static bool print_and_log_message(const Message *message, FILE *log) {
+    char ip[INET_ADDRSTRLEN];
 
-  for (int i = 0; i < num_msg; i++) {
-    uint8_t buf[MSG_LEN];
-    char str[MSG_LEN * 2 + 1];
-    if (getentropy(buf, MSG_LEN) != 0)
-      handle_error("getentropy");
+    if (inet_ntop(AF_INET, &message->sender_ip, ip, sizeof(ip)) == NULL) return false;
 
-    if (convert(buf, sizeof(buf), str, sizeof(str)) == -1)
-      handle_error("convert");
+    unsigned port = ntohs(message->sender_port);
 
-    char output[1 + MSG_LEN * 2 + 1];
-    output[0] = 0;
-    memcpy(output + 1, str, MSG_LEN * 2);
-    output[1 + MSG_LEN * 2] = '\n';
+    /*
+     * Printed metadata needs more space than the seven-byte wire header.
+     */
+    char output[15 + 10 + MAX_TEXT_SIZE + 2];
 
-    if (write_func(fd, output, sizeof(output)) == -1)
-      handle_error("write");
-  }
+    int prefix_length = snprintf(output, sizeof(output), "%-15s%-10u", ip, port);
 
-  char buf_type1[2] = {1, '\n'};
-  if (write_func(fd, buf_type1, 2) == -1)
-    handle_error("write");
+    if (prefix_length < 0 || (size_t)prefix_length >= sizeof(output)) return false;
 
-  return NULL;
+    size_t prefix = (size_t)prefix_length;
+
+    if (message->text_length > sizeof(output) - prefix - 2) return false;
+
+    /*
+     * Copy by explicit length, so embedded NUL bytes cannot truncate text.
+     */
+    memcpy(output + prefix, message->text, message->text_length);
+
+    size_t length = prefix + message->text_length;
+    output[length++] = '\n';
+    output[length] = '\0';
+
+    if (fwrite(output, 1, length, stdout) != length || fwrite(output, 1, length, log) != length) return false;
+
+    return fflush(stdout) == 0 && fflush(log) == 0;
+}
+
+static int receive_messages(Connection *connection, FILE *log) {
+    for (;;) {
+        IoResult io_result = connection_receive(connection);
+
+        if (io_result == IO_WOULD_BLOCK) continue;
+
+        if (io_result == IO_CLOSED) {
+            fprintf(stderr, "Server closed before a complete shutdown message\n");
+            return -1;
+        }
+
+        if (io_result != IO_PROGRESS) {
+            fprintf(stderr, "Failed to receive server data\n");
+            return -1;
+        }
+
+        for (;;) {
+            Message message;
+
+            ParseResult result = connection_next_message(connection, true, &message);
+
+            if (result == PARSE_INCOMPLETE) break;
+
+            if (result == PARSE_INVALID) {
+                fprintf(stderr, "Invalid server frame\n");
+                return -1;
+            }
+
+            if (message.type == MESSAGE_DONE) return 0;
+
+            if (!print_and_log_message(&message, log)) {
+                fprintf(stderr, "Failed to print or log a message\n");
+                return -1;
+            }
+        }
+    }
 }
 
 int main(int argc, char *argv[]) {
-  if (argc != 5) {
-    fprintf(stderr, "Must have 5 arguments\n");
-    exit(EXIT_FAILURE);
-  }
+    ClientConfig config;
 
-  struct in_addr ip;
-  if (inet_pton(AF_INET, argv[1], &ip) != 1)
-    handle_error("inet_pton");
+    if (!parse_client_args(argc, argv, &config)) {
+        fprintf(stderr,
+                "Usage: %s <IPv4 address> <port: 1-65535> "
+                "<message count: 0-INT_MAX> <log path>\n",
+                argv[0]);
+        return EXIT_FAILURE;
+    }
 
-  uint16_t port = (uint16_t)atoi(argv[2]);
-  int num_msg = (int)atoi(argv[3]);
-  char *log_path = argv[4];
+    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
+        perror("signal");
+        return EXIT_FAILURE;
+    }
 
-  struct sockaddr_in addr;
-  int sfd = socket(AF_INET, SOCK_STREAM, 0);
-  if (sfd == -1)
-    handle_error("socket");
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
 
-  memset(&addr, 0, sizeof(struct sockaddr_in));
-  addr.sin_family = AF_INET;
-  addr.sin_port = htons(port);
-  addr.sin_addr = ip;
+    if (fd == -1) {
+        perror("socket");
+        return EXIT_FAILURE;
+    }
 
-  if (connect(sfd, (struct sockaddr *)&addr, sizeof(struct sockaddr_in)) == -1)
-    handle_error("connect");
+    struct sockaddr_in address = {.sin_family = AF_INET, .sin_port = htons(config.port), .sin_addr = config.address};
 
-  struct read_arg read_arg;
-  read_arg.fd = sfd;
-  read_arg.log_path = log_path;
-  struct write_arg write_arg;
-  write_arg.fd = sfd;
-  write_arg.num_msg = num_msg;
+    if (connect(fd, (struct sockaddr *)&address, sizeof(address)) == -1) {
+        perror("connect");
+        close(fd);
+        return EXIT_FAILURE;
+    }
 
-  pthread_t r_tid, w_tid;
-  pthread_create(&r_tid, NULL, read_thread, &read_arg);
-  pthread_create(&w_tid, NULL, write_thread, &write_arg);
+    FILE *log = fopen(config.log_path, "w");
 
-  pthread_join(r_tid, NULL);
-  pthread_join(w_tid, NULL);
+    if (log == NULL) {
+        perror("open log");
+        close(fd);
+        return EXIT_FAILURE;
+    }
 
-  close(sfd);
-  return 0;
+    Connection connection;
+    connection_init(&connection, fd, 0, 0);
+
+    SenderArgs sender_args = {.fd = fd, .message_count = config.message_count, .error = 0};
+
+    pthread_t sender;
+
+    int thread_error = pthread_create(&sender, NULL, send_messages, &sender_args);
+
+    if (thread_error != 0) {
+        errno = thread_error;
+        perror("pthread_create");
+        connection_close(&connection);
+        fclose(log);
+        return EXIT_FAILURE;
+    }
+
+    int result = receive_messages(&connection, log);
+
+    /*
+     * A malformed response or premature shutdown must also wake a sender
+     * that is blocked in write_all().
+     */
+    shutdown(fd, SHUT_RDWR);
+
+    thread_error = pthread_join(sender, NULL);
+
+    if (thread_error != 0) {
+        errno = thread_error;
+        perror("pthread_join");
+
+        /*
+         * Do not return from main with a worker potentially using its
+         * stack-allocated arguments. Terminate the process on this error.
+         */
+        exit(EXIT_FAILURE);
+    }
+
+    if (sender_args.error != 0) {
+        errno = sender_args.error;
+        perror("send messages");
+        result = -1;
+    }
+
+    connection_close(&connection);
+
+    if (fclose(log) == EOF) {
+        perror("close log");
+        result = -1;
+    }
+
+    return result == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

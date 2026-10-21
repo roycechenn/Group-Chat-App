@@ -12,7 +12,7 @@ enum {
     MAX_FRAME_SIZE = 1024,
     BORADCAST_HEADER_SIZE = 7, // [type:1 byte][IP:4 bytes][port:2 bytes]
     MAX_TEXT_SIZE = MAX_FRAME_SIZE - BORADCAST_HEADER_SIZE - 1,
-    MAX_CLIENT_FRAME_SIZE = MAX_FRAME_SIZE + 2 // [type:1 byte][newline: 1 byte]
+    MAX_CLIENT_FRAME_SIZE = MAX_TEXT_SIZE + 2 // text plus type and newline
 };
 
 typedef struct {

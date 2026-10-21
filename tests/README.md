@@ -5,8 +5,8 @@ standard library, real loopback TCP sockets, and a mock server; no pip packages
 or Linux-only assignment tester executables are needed.
 
 The suite contains **53 test methods**, with additional parameterized boundary
-cases. It targets the existing binary protocol and the repairs described in
-[the bug-fix guide](../docs/bug-fix-guide.md). It does not change application code.
+cases. It targets the existing binary protocol and the behavior described below.
+It does not change application code.
 
 ## Build and run
 
